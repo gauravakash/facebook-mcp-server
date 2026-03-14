@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: facebook-mcp
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: FB_PAGE_ACCESS_TOKEN
+        sync: false        # you enter this in Render dashboard
+      - key: FB_PAGE_ID
+        sync: false
+      - key: MCP_SECRET
+        sync: false        # optional, but recommended
+      - key: NODE_ENV
+        value: production
