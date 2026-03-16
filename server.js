@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 /**
- * Facebook MCP Server — SSE Edition
+ * Facebook MCP Server — SSE Edition (Fixed)
  * Works with claude.ai web interface via Server-Sent Events transport
- *
- * Deploy to Railway / Render / Fly.io, then add the public URL
- * to Claude.ai → Settings → Connectors → Add MCP Server
  *
  * Env vars required:
  *   FB_PAGE_ACCESS_TOKEN  — Facebook Page Access Token
@@ -12,17 +9,16 @@
  *   MCP_SECRET            — (optional) A secret string to protect your endpoint
  *   PORT                  — (set automatically by Railway/Render, default 3000)
  */
-
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const PORT   = process.env.PORT || 3000;
-const TOKEN  = process.env.FB_PAGE_ACCESS_TOKEN;
+const PORT    = process.env.PORT || 3000;
+const TOKEN   = process.env.FB_PAGE_ACCESS_TOKEN;
 const PAGE_ID = process.env.FB_PAGE_ID;
-const SECRET = process.env.MCP_SECRET; // optional bearer token guard
+const SECRET  = process.env.MCP_SECRET; // optional bearer token guard
 
 if (!TOKEN || !PAGE_ID) {
   console.error("[facebook-mcp] ERROR: FB_PAGE_ACCESS_TOKEN and FB_PAGE_ID must be set.");
@@ -39,7 +35,6 @@ async function fbGet(path, params = {}) {
   const res = await fetch(url.toString());
   return res.json();
 }
-
 async function fbPost(path, body = {}) {
   const res = await fetch(`${FB_BASE}${path}`, {
     method: "POST",
@@ -48,13 +43,12 @@ async function fbPost(path, body = {}) {
   });
   return res.json();
 }
-
 async function fbDelete(path) {
   const res = await fetch(`${FB_BASE}${path}?access_token=${TOKEN}`, { method: "DELETE" });
   return res.json();
 }
 
-// ── Build MCP tools (shared between all sessions) ────────────────────────────
+// ── Build MCP tools ───────────────────────────────────────────────────────────
 function buildMcpServer() {
   const mcp = new McpServer({ name: "facebook-mcp", version: "1.0.0" });
 
@@ -175,11 +169,14 @@ function buildMcpServer() {
 const ok  = (text) => ({ content: [{ type: "text", text }] });
 const err = (data) => ({ content: [{ type: "text", text: `Error: ${data?.error?.message || JSON.stringify(data)}` }] });
 
+// ── Session store — maps sessionId → SSEServerTransport ──────────────────────
+const transports = {};
+
 // ── Express app ───────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 
-// Optional: protect with a bearer token
+// Optional bearer token guard
 function authMiddleware(req, res, next) {
   if (!SECRET) return next();
   const auth = req.headers.authorization || "";
@@ -187,7 +184,7 @@ function authMiddleware(req, res, next) {
   res.status(401).json({ error: "Unauthorized — set Authorization: Bearer <MCP_SECRET>" });
 }
 
-// Health check — Railway and Render ping this
+// Health check
 app.get("/", (req, res) => {
   res.json({
     name: "facebook-mcp-server",
@@ -199,33 +196,39 @@ app.get("/", (req, res) => {
   });
 });
 
-// SSE endpoint — Claude connects here
-// Each request creates a fresh MCP server instance with its own SSE transport
+// SSE endpoint — Claude opens this to start a session
 app.get("/sse", authMiddleware, async (req, res) => {
   console.log(`[SSE] New connection from ${req.ip}`);
 
-  // Keep the SSE connection alive
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no"); // for Nginx proxies
+  res.setHeader("X-Accel-Buffering", "no");
 
-  const mcp = buildMcpServer();
   const transport = new SSEServerTransport("/message", res);
+  const sessionId = transport.sessionId;
+  transports[sessionId] = transport;
+  console.log(`[SSE] Session started: ${sessionId}`);
 
   req.on("close", () => {
-    console.log("[SSE] Client disconnected");
+    console.log(`[SSE] Client disconnected: ${sessionId}`);
+    delete transports[sessionId];
     transport.close?.();
   });
 
+  const mcp = buildMcpServer();
   await mcp.connect(transport);
 });
 
-// Message endpoint — Claude sends tool calls here
+// Message endpoint — Claude sends JSON-RPC tool calls here
 app.post("/message", authMiddleware, async (req, res) => {
-  // The SSEServerTransport handles routing internally via sessionId
-  // This endpoint is registered automatically by the SDK — we just need it to exist
-  res.status(200).json({ ok: true });
+  const sessionId = req.query.sessionId;
+  const transport = transports[sessionId];
+  if (!transport) {
+    console.warn(`[message] Unknown sessionId: ${sessionId}`);
+    return res.status(400).json({ error: "Unknown sessionId" });
+  }
+  await transport.handlePostMessage(req, res);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -234,5 +237,5 @@ app.listen(PORT, () => {
   console.log(`[facebook-mcp] Health: http://localhost:${PORT}/`);
   console.log(`[facebook-mcp] SSE:    http://localhost:${PORT}/sse`);
   if (SECRET) console.log("[facebook-mcp] Auth: Bearer token protection ENABLED");
-  else        console.log("[facebook-mcp] Auth: No secret set — endpoint is public");
+  else console.log("[facebook-mcp] Auth: No secret set — endpoint is public");
 });
